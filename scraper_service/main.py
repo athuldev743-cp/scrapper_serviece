@@ -359,54 +359,90 @@ def merge_results(results: list[dict]) -> dict:
 
 
 def build_design_brief(merged: dict, keyword: str) -> dict:
-    palette = merged["color_palette"]
-    fonts   = merged["fonts"]
-    spacing = merged["spacing_scale"]
-    radii   = merged["border_radius"]
-    comps   = merged["component_patterns"]
-    easings = merged["easing_functions"]
+    palette     = merged["color_palette"]
+    fonts       = merged["fonts"]
+    spacing     = merged["spacing_scale"]
+    radii       = merged["border_radius"]
+    comps       = merged["component_patterns"]
+    easings     = merged["easing_functions"]
+    transitions = merged["transition_examples"]
 
-    # Compose natural-language prompt injections
-    color_str   = ", ".join(palette[:5]) if palette else "use modern neutral tones with one bold accent"
-    font_str    = " + ".join(fonts[:2])  if fonts   else "a clean geometric sans-serif"
-    spacing_str = ", ".join(spacing[:3]) if spacing  else "8px, 16px, 24px, 48px"
-    radius_str  = radii[0] if radii else "8px"
-    comp_str    = ", ".join(comps[:6])   if comps   else "card, hero, navbar"
-    easing_str  = easings[0] if easings else "cubic-bezier(0.4, 0, 0.2, 1)"
+    font_str  = " + ".join(fonts[:2]) if fonts else "Plus Jakarta Sans + DM Sans"
+    comp_str  = ", ".join(comps[:6])  if comps else "card, hero, navbar"
+    easing_str = easings[0]           if easings else "cubic-bezier(0.4,0,0.2,1)"
+    trans_str  = transitions[0]       if transitions else "all 0.2s cubic-bezier(0.4,0,0.2,1)"
+
+    bg   = palette[0] if len(palette) > 0 else "#0f172a"
+    surf = palette[1] if len(palette) > 1 else "#1e293b"
+    light= palette[2] if len(palette) > 2 else "#f8fafc"
+    muted= palette[3] if len(palette) > 3 else "#e2e8f0"
+    acc  = palette[4] if len(palette) > 4 else "#6366f1"
+    pos  = palette[5] if len(palette) > 5 else "#22c55e"
+    r0   = radii[0]   if len(radii) > 0   else "8px"
+    r1   = radii[1]   if len(radii) > 1   else "16px"
+    sp2  = spacing[2] if len(spacing) > 2  else "24px"
+    f0   = fonts[0]   if len(fonts) > 0   else "Plus Jakarta Sans"
+    f1   = fonts[1]   if len(fonts) > 1   else "DM Sans"
 
     css_prompt = (
-        f"Use this exact color palette: {color_str}. "
-        f"Typography: {font_str} via Google Fonts. "
-        f"Spacing scale: {spacing_str}. "
-        f"Border-radius: {radius_str}. "
-        f"UI patterns detected: {comp_str}. "
-        f"Easing: {easing_str}. "
-        f"Add smooth transitions (200-400ms) on interactive elements. "
-        f"Use CSS custom properties for all colors and spacing."
+        "MANDATORY DESIGN SYSTEM - follow every rule exactly:\n\n"
+        "CSS Custom Properties (place in :root):\n"
+        f"  --bg: {bg};\n"
+        f"  --surface: {surf};\n"
+        f"  --surface-2: color-mix(in srgb, {surf} 80%, {light});\n"
+        f"  --text: {light};\n"
+        f"  --text-muted: {muted};\n"
+        f"  --accent: {acc};\n"
+        f"  --positive: {pos};\n"
+        f"  --radius: {r0};\n"
+        f"  --radius-lg: {r1};\n"
+        f"  --transition: {trans_str};\n\n"
+        f"Typography - import from Google Fonts and apply:\n"
+        f"  body font-family: '{f0}', sans-serif;\n"
+        f"  headings: '{f0}' bold;\n"
+        f"  mono/data: '{f1}';\n\n"
+        "Layout rules:\n"
+        "  body background: var(--bg);\n"
+        f"  all cards/panels: background var(--surface), border-radius var(--radius-lg), padding 24px, border 1px solid rgba(255,255,255,0.06);\n"
+        f"  section spacing: gap {sp2};\n"
+        "  max-width container: 1200px, margin auto, padding 0 24px;\n\n"
+        "Component rules (apply to ALL matching elements):\n"
+        "  buttons: background var(--accent), color #fff, padding 10px 20px, border-radius var(--radius), font-weight 600, transition var(--transition), no border;\n"
+        "  buttons:hover: filter brightness(1.15), transform translateY(-1px);\n"
+        "  inputs: background var(--surface-2), border 1px solid rgba(255,255,255,0.08), color var(--text), border-radius var(--radius), padding 10px 14px;\n"
+        "  inputs:focus: border-color var(--accent), outline none, box-shadow 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);\n"
+        "  cards: box-shadow 0 4px 24px rgba(0,0,0,0.3);\n"
+        "  navbar/header: background var(--surface), border-bottom 1px solid rgba(255,255,255,0.06), padding 16px 24px;\n"
+        "  badges/pills: background color-mix(in srgb, var(--accent) 15%, transparent), color var(--accent), padding 4px 10px, border-radius 999px, font-size 0.75rem;\n"
+        "  positive values: color var(--positive);\n"
+        "  tables/lists: border-bottom 1px solid rgba(255,255,255,0.05) per row;\n\n"
+        "Animations:\n"
+        f"  page load: @keyframes fadeUp - from opacity:0 translateY(16px) to opacity:1 translateY(0), 400ms {easing_str};\n"
+        "  apply fadeUp to cards with staggered animation-delay (0ms, 80ms, 160ms);\n"
+        "  all interactive elements: transition var(--transition);\n\n"
+        f"DETECTED PATTERNS for this project: {comp_str}"
     )
 
     plan_theme = (
-        f"Modern {keyword} UI - palette: {color_str}; "
-        f"fonts: {font_str}; components: {comp_str}; "
-        f"smooth micro-animations with {easing_str} easing."
+        f"Modern {keyword} UI - dark theme with {bg} background, {acc} accent, "
+        f"surface cards with subtle borders, {font_str} typography, "
+        f"smooth {easing_str} animations, components: {comp_str}."
     )
 
     return {
-        "keyword":         keyword,
-        "sources_scraped": merged["sources_scraped"],
-        "color_palette":   palette,
-        "fonts":           fonts,
-        "spacing_scale":   spacing,
-        "border_radius":   radii,
+        "keyword":            keyword,
+        "sources_scraped":    merged["sources_scraped"],
+        "color_palette":      palette,
+        "fonts":              fonts,
+        "spacing_scale":      spacing,
+        "border_radius":      radii,
         "component_patterns": comps,
-        "animation_examples":   merged["animation_examples"],
-        "transition_examples":  merged["transition_examples"],
-        "easing_functions":     merged["easing_functions"],
-        # ── Ready-to-inject strings ──
+        "animation_examples":    merged["animation_examples"],
+        "transition_examples":   merged["transition_examples"],
+        "easing_functions":      merged["easing_functions"],
         "css_prompt_injection":  css_prompt,
         "plan_theme_injection":  plan_theme,
     }
-
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
