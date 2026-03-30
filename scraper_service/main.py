@@ -1,249 +1,106 @@
 ﻿import re
+import os
 import json
 import asyncio
 import httpx
+import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Design Scraper Service", version="1.0.0")
+app = FastAPI(title="Design Scraper Service", version="2.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
 }
-
 TIMEOUT = 6.0
+ANIMATE_CSS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css"
+GRADIENTS_JSON_URL = "https://raw.githubusercontent.com/ghosh/uiGradients/master/gradients.json"
 
-# ─── Colour helpers ──────────────────────────────────────────────────────────
-
-HEX_RE   = re.compile(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b')
-RGB_RE   = re.compile(r'rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})')
-HSL_RE   = re.compile(r'hsla?\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%')
-
-NOISE_COLORS = {
-    "#ffffff", "#000000", "#fff", "#000",
-    "#f0f0f0", "#e0e0e0", "#cccccc", "#333333",
+CATEGORY_ANIMATIONS = {
+    "todo":      ["fadeInUp", "fadeIn", "slideInLeft", "pulse"],
+    "dashboard": ["fadeInUp", "fadeIn", "zoomIn", "slideInDown"],
+    "saas":      ["fadeInUp", "zoomIn", "fadeIn", "slideInUp"],
+    "ecommerce": ["fadeInUp", "slideInLeft", "pulse", "fadeIn"],
+    "blog":      ["fadeIn", "fadeInUp", "slideInUp"],
+    "chat":      ["fadeInUp", "slideInLeft", "slideInRight", "fadeIn"],
+    "finance":   ["fadeInUp", "fadeIn", "zoomIn", "slideInDown"],
+    "portfolio": ["fadeInUp", "zoomIn", "fadeIn", "slideInLeft"],
+    "default":   ["fadeInUp", "fadeIn", "slideInUp", "pulse"],
 }
 
-def _hex3_to_6(h: str) -> str:
-    return "".join(c * 2 for c in h)
+ELEMENT_ANIMATION_MAP = {
+    "card":    "animate__animated animate__fadeInUp",
+    "hero":    "animate__animated animate__fadeIn",
+    "navbar":  "animate__animated animate__slideInDown",
+    "modal":   "animate__animated animate__zoomIn",
+    "toast":   "animate__animated animate__slideInRight",
+    "badge":   "animate__animated animate__pulse",
+    "sidebar": "animate__animated animate__slideInLeft",
+    "list":    "animate__animated animate__fadeInUp",
+}
 
-def extract_colors_from_css(css_text: str) -> list[str]:
-    colors: set[str] = set()
-    for m in HEX_RE.finditer(css_text):
-        h = m.group(1)
-        full = ("#" + (_hex3_to_6(h) if len(h) == 3 else h)).lower()
-        if full not in NOISE_COLORS:
-            colors.add(full)
-    for m in RGB_RE.finditer(css_text):
-        r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        full = "#{:02x}{:02x}{:02x}".format(r, g, b)
-        if full not in NOISE_COLORS:
-            colors.add(full)
-    return list(colors)[:12]
+TRANSITION_RECIPES = {
+    "smooth":     "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+    "spring":     "all 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+    "snappy":     "all 0.15s cubic-bezier(0.4, 0, 1, 1)",
+    "bouncy":     "all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1)",
+    "slow_fade":  "opacity 0.6s ease, transform 0.6s ease",
+    "color_only": "color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease",
+    "lift":       "transform 0.2s ease, box-shadow 0.2s ease",
+    "slide_up":   "transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease",
+}
 
-def extract_colors_from_soup(soup: BeautifulSoup) -> list[str]:
-    colors: set[str] = set()
-    for tag in soup.find_all(style=True):
-        colors.update(extract_colors_from_css(tag["style"]))
-    for style_tag in soup.find_all("style"):
-        if style_tag.string:
-            colors.update(extract_colors_from_css(style_tag.string))
-    return list(colors)[:12]
+CATEGORY_TRANSITIONS = {
+    "todo":      ["smooth", "snappy", "lift"],
+    "dashboard": ["smooth", "slow_fade", "color_only"],
+    "saas":      ["spring", "smooth", "lift"],
+    "ecommerce": ["smooth", "lift", "snappy"],
+    "blog":      ["slow_fade", "smooth", "color_only"],
+    "chat":      ["snappy", "smooth", "slide_up"],
+    "finance":   ["smooth", "color_only", "lift"],
+    "portfolio": ["spring", "slow_fade", "lift"],
+    "default":   ["smooth", "lift", "spring"],
+}
 
-# ─── Font helpers ─────────────────────────────────────────────────────────────
-
-GFONT_RE   = re.compile(r'fonts\.googleapis\.com/css[^"\']*family=([^"\'&]+)')
-FF_CSS_RE  = re.compile(r'font-family\s*:\s*([^;}{]+)')
-FALLBACKS  = {"sans-serif","serif","monospace","inherit","initial","unset","var(--font)"}
-
-def extract_fonts(soup: BeautifulSoup, css_text: str = "") -> list[str]:
-    fonts: list[str] = []
-    seen: set[str] = set()
-
-    # Google Fonts links
-    for m in GFONT_RE.finditer(str(soup)):
-        for raw in m.group(1).replace("+", " ").split("|"):
-            name = raw.split(":")[0].strip()
-            if name and name not in seen:
-                fonts.append(name); seen.add(name)
-
-    # font-family rules in <style> or inline
-    combined = css_text
-    for tag in soup.find_all("style"):
-        if tag.string:
-            combined += tag.string
-    for m in FF_CSS_RE.finditer(combined):
-        for part in m.group(1).split(","):
-            name = part.strip().strip("'\"")
-            if name and name.lower() not in FALLBACKS and name not in seen:
-                fonts.append(name); seen.add(name)
-
-    return fonts[:6]
-
-# ─── Spacing / layout helpers ─────────────────────────────────────────────────
-
-SPACING_RE = re.compile(r'(?:padding|margin|gap|space)[^:]*:\s*([\d.]+(?:px|rem|em))')
-RADIUS_RE  = re.compile(r'border-radius[^:]*:\s*([\d.]+(?:px|rem|em|%))')
-
-def extract_spacing(css_text: str) -> dict:
-    spacing_vals = SPACING_RE.findall(css_text)
-    radius_vals  = RADIUS_RE.findall(css_text)
-    return {
-        "spacing_scale": list(dict.fromkeys(spacing_vals))[:6],
-        "border_radius":  list(dict.fromkeys(radius_vals))[:4],
-    }
-
-# ─── Animation / transition helpers ──────────────────────────────────────────
-
-ANIM_RE   = re.compile(r'animation\s*:[^;]+')
-TRANS_RE  = re.compile(r'transition\s*:[^;]+')
-EASING_RE = re.compile(r'(?:ease|cubic-bezier)[^;,)]*')
-
-def extract_animations(css_text: str) -> dict:
-    animations   = ANIM_RE.findall(css_text)[:4]
-    transitions  = TRANS_RE.findall(css_text)[:4]
-    easings      = list(dict.fromkeys(EASING_RE.findall(css_text)))[:4]
-    return {
-        "animation_examples": [a.strip() for a in animations],
-        "transition_examples": [t.strip() for t in transitions],
-        "easing_functions": easings,
-    }
-
-# ─── UI component patterns ────────────────────────────────────────────────────
-
-COMPONENT_KEYWORDS = [
-    "card", "hero", "navbar", "modal", "badge",
-    "chip", "pill", "toast", "tooltip", "sidebar",
-    "grid", "flex", "blur", "glass", "shadow",
-]
-
-def extract_component_patterns(soup: BeautifulSoup, css_text: str = "") -> list[str]:
-    combined = (css_text + " " + " ".join(
-        t.get("class", []) if isinstance(t.get("class", []), list)
-        else [t.get("class", "")]
-        for t in soup.find_all(True)
-    )).lower()
-    return [kw for kw in COMPONENT_KEYWORDS if kw in combined]
-
-# ─── Design token database (curated, always available) ───────────────────────
-# Keyword-matched palettes sourced from real design systems & open-source UIs.
-# These never get blocked and return instantly.
+GRADIENT_DB = {
+    "todo":      [("Cosmic Fusion","linear-gradient(135deg,#0f172a 0%,#312e81 100%)","#f8fafc"),("Deep Space","linear-gradient(135deg,#0f0c29 0%,#302b63 50%,#24243e 100%)","#f8fafc")],
+    "dashboard": [("Dark Ocean","linear-gradient(135deg,#0a0a0b 0%,#0f172a 100%)","#f0fdf4"),("Carbon","linear-gradient(135deg,#0a0a0b 0%,#1a1a2e 100%)","#e2e8f0")],
+    "saas":      [("Violet Sky","linear-gradient(135deg,#030712 0%,#1e1b4b 100%)","#f9fafb"),("Predawn","linear-gradient(135deg,#030712 0%,#2d1b69 100%)","#e5e7eb")],
+    "ecommerce": [("Autumn Warmth","linear-gradient(135deg,#1c1917 0%,#292524 100%)","#fef3c7"),("Ember","linear-gradient(135deg,#1c1917 0%,#451a03 100%)","#fed7aa")],
+    "blog":      [("Dark Romance","linear-gradient(135deg,#1a1a2e 0%,#16213e 100%)","#f5f5f5"),("Editorial","linear-gradient(135deg,#1a1a2e 0%,#0f3460 50%,#16213e 100%)","#e2e8f0")],
+    "chat":      [("Deep Twilight","linear-gradient(135deg,#0f172a 0%,#1e293b 100%)","#e2e8f0"),("Nebula","linear-gradient(135deg,#0f172a 0%,#1a0533 100%)","#c4b5fd")],
+    "finance":   [("Matrix","linear-gradient(135deg,#0d1117 0%,#161b22 100%)","#00d084"),("Dark Terminal","linear-gradient(135deg,#0d1117 0%,#010409 100%)","#00d084")],
+    "portfolio": [("Obsidian","linear-gradient(135deg,#09090b 0%,#18181b 100%)","#fafafa"),("Void","linear-gradient(135deg,#09090b 0%,#27272a 100%)","#a1a1aa")],
+    "default":   [("Midnight","linear-gradient(135deg,#0f172a 0%,#1e293b 100%)","#f8fafc"),("Deep Blue","linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%)","#e2e8f0")],
+}
 
 DESIGN_DB = {
-    "todo": {
-        "colors": ["#0f172a", "#6366f1", "#f1f5f9", "#e2e8f0", "#22c55e", "#ef4444"],
-        "fonts": ["Plus Jakarta Sans", "DM Sans"],
-        "spacing_scale": ["4px", "8px", "16px", "24px", "48px"],
-        "border_radius": ["6px", "12px", "999px"],
-        "component_patterns": ["card", "pill", "checkbox", "input", "toast"],
-        "animation_examples": ["transform 200ms ease", "opacity 150ms ease-in-out"],
-        "transition_examples": ["all 0.2s cubic-bezier(0.4,0,0.2,1)"],
-        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)", "ease-out"],
-    },
-    "dashboard": {
-        "colors": ["#0a0a0b", "#18181b", "#3b82f6", "#06b6d4", "#f0fdf4", "#d1fae5"],
-        "fonts": ["Inter", "JetBrains Mono"],
-        "spacing_scale": ["8px", "16px", "24px", "32px", "64px"],
-        "border_radius": ["4px", "8px", "16px"],
-        "component_patterns": ["card", "sidebar", "chart", "badge", "navbar", "grid"],
-        "animation_examples": ["transform 300ms ease", "width 500ms ease-in-out"],
-        "transition_examples": ["all 0.3s ease"],
-        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
-    },
-    "saas": {
-        "colors": ["#030712", "#6366f1", "#8b5cf6", "#f9fafb", "#e5e7eb", "#fbbf24"],
-        "fonts": ["Sora", "Inter"],
-        "spacing_scale": ["8px", "16px", "32px", "64px", "128px"],
-        "border_radius": ["8px", "16px", "24px"],
-        "component_patterns": ["hero", "card", "navbar", "modal", "badge", "glass"],
-        "animation_examples": ["transform 400ms cubic-bezier(0.4,0,0.2,1)", "opacity 300ms ease"],
-        "transition_examples": ["all 0.25s ease"],
-        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)", "cubic-bezier(0.16,1,0.3,1)"],
-    },
-    "ecommerce": {
-        "colors": ["#1c1917", "#f97316", "#fef3c7", "#ffffff", "#e7e5e4", "#10b981"],
-        "fonts": ["Nunito", "Lato"],
-        "spacing_scale": ["8px", "12px", "20px", "32px", "48px"],
-        "border_radius": ["4px", "8px", "20px"],
-        "component_patterns": ["card", "badge", "hero", "grid", "pill", "toast"],
-        "animation_examples": ["transform 200ms ease-out", "box-shadow 200ms ease"],
-        "transition_examples": ["all 0.2s ease-out"],
-        "easing_functions": ["ease-out", "cubic-bezier(0.4,0,0.2,1)"],
-    },
-    "blog": {
-        "colors": ["#1a1a2e", "#e94560", "#f5f5f5", "#ffffff", "#16213e", "#0f3460"],
-        "fonts": ["Playfair Display", "Source Serif 4"],
-        "spacing_scale": ["8px", "16px", "24px", "40px", "80px"],
-        "border_radius": ["2px", "4px", "8px"],
-        "component_patterns": ["card", "hero", "navbar", "grid"],
-        "animation_examples": ["opacity 300ms ease", "transform 300ms ease"],
-        "transition_examples": ["all 0.3s ease"],
-        "easing_functions": ["ease", "ease-in-out"],
-    },
-    "chat": {
-        "colors": ["#0f172a", "#1e293b", "#38bdf8", "#e2e8f0", "#7c3aed", "#f472b6"],
-        "fonts": ["Outfit", "JetBrains Mono"],
-        "spacing_scale": ["4px", "8px", "12px", "16px", "24px"],
-        "border_radius": ["8px", "16px", "24px", "999px"],
-        "component_patterns": ["card", "pill", "modal", "blur", "glass", "shadow"],
-        "animation_examples": ["transform 150ms ease", "opacity 200ms ease-in-out"],
-        "transition_examples": ["all 0.15s ease"],
-        "easing_functions": ["ease-out", "cubic-bezier(0.4,0,0.2,1)"],
-    },
-    "finance": {
-        "colors": ["#0d1117", "#161b22", "#00d084", "#0075ff", "#f0f6fc", "#8b949e"],
-        "fonts": ["IBM Plex Sans", "IBM Plex Mono"],
-        "spacing_scale": ["8px", "16px", "24px", "32px", "48px"],
-        "border_radius": ["4px", "6px", "12px"],
-        "component_patterns": ["card", "chart", "badge", "table", "sidebar", "navbar"],
-        "animation_examples": ["width 600ms cubic-bezier(0.4,0,0.2,1)", "opacity 200ms ease"],
-        "transition_examples": ["all 0.2s ease"],
-        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
-    },
-    "portfolio": {
-        "colors": ["#09090b", "#18181b", "#a1a1aa", "#fafafa", "#e4e4e7", "#6366f1"],
-        "fonts": ["Space Grotesk", "Fraunces"],
-        "spacing_scale": ["8px", "16px", "32px", "64px", "120px"],
-        "border_radius": ["0px", "4px", "8px"],
-        "component_patterns": ["hero", "grid", "card", "navbar"],
-        "animation_examples": ["transform 500ms cubic-bezier(0.16,1,0.3,1)", "opacity 400ms ease"],
-        "transition_examples": ["all 0.4s cubic-bezier(0.16,1,0.3,1)"],
-        "easing_functions": ["cubic-bezier(0.16,1,0.3,1)", "cubic-bezier(0.4,0,0.2,1)"],
-    },
-    "default": {
-        "colors": ["#0f172a", "#6366f1", "#f8fafc", "#e2e8f0", "#22c55e", "#f59e0b"],
-        "fonts": ["Plus Jakarta Sans", "DM Sans"],
-        "spacing_scale": ["8px", "16px", "24px", "48px"],
-        "border_radius": ["8px", "12px"],
-        "component_patterns": ["card", "hero", "navbar", "button"],
-        "animation_examples": ["transform 200ms ease", "opacity 200ms ease"],
-        "transition_examples": ["all 0.2s cubic-bezier(0.4,0,0.2,1)"],
-        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
-    },
+    "todo":      {"colors":["#0f172a","#1e293b","#f1f5f9","#e2e8f0","#6366f1","#22c55e"],"fonts":["Plus Jakarta Sans","DM Sans"],"spacing_scale":["4px","8px","16px","24px","48px"],"border_radius":["6px","12px","999px"],"component_patterns":["card","pill","input","toast","list"]},
+    "dashboard": {"colors":["#0a0a0b","#18181b","#3b82f6","#06b6d4","#f0fdf4","#d1fae5"],"fonts":["Inter","JetBrains Mono"],"spacing_scale":["8px","16px","24px","32px","64px"],"border_radius":["4px","8px","16px"],"component_patterns":["card","sidebar","badge","navbar","grid"]},
+    "saas":      {"colors":["#030712","#1e1b4b","#6366f1","#8b5cf6","#f9fafb","#fbbf24"],"fonts":["Sora","Inter"],"spacing_scale":["8px","16px","32px","64px","128px"],"border_radius":["8px","16px","24px"],"component_patterns":["hero","card","navbar","modal","badge"]},
+    "ecommerce": {"colors":["#1c1917","#292524","#f97316","#fef3c7","#e7e5e4","#10b981"],"fonts":["Nunito","Lato"],"spacing_scale":["8px","12px","20px","32px","48px"],"border_radius":["4px","8px","20px"],"component_patterns":["card","badge","hero","grid","pill"]},
+    "blog":      {"colors":["#1a1a2e","#16213e","#e94560","#f5f5f5","#ffffff","#0f3460"],"fonts":["Playfair Display","Source Serif 4"],"spacing_scale":["8px","16px","24px","40px","80px"],"border_radius":["2px","4px","8px"],"component_patterns":["card","hero","navbar","grid"]},
+    "chat":      {"colors":["#0f172a","#1e293b","#38bdf8","#e2e8f0","#7c3aed","#f472b6"],"fonts":["Outfit","JetBrains Mono"],"spacing_scale":["4px","8px","12px","16px","24px"],"border_radius":["8px","16px","24px","999px"],"component_patterns":["card","pill","modal","sidebar"]},
+    "finance":   {"colors":["#0d1117","#161b22","#00d084","#0075ff","#f0f6fc","#8b949e"],"fonts":["IBM Plex Sans","IBM Plex Mono"],"spacing_scale":["8px","16px","24px","32px","48px"],"border_radius":["4px","6px","12px"],"component_patterns":["card","badge","navbar","sidebar","grid"]},
+    "portfolio": {"colors":["#09090b","#18181b","#a1a1aa","#fafafa","#e4e4e7","#6366f1"],"fonts":["Space Grotesk","Fraunces"],"spacing_scale":["8px","16px","32px","64px","120px"],"border_radius":["0px","4px","8px"],"component_patterns":["hero","grid","card","navbar"]},
+    "default":   {"colors":["#0f172a","#1e293b","#6366f1","#f8fafc","#e2e8f0","#22c55e"],"fonts":["Plus Jakarta Sans","DM Sans"],"spacing_scale":["8px","16px","24px","48px"],"border_radius":["8px","12px"],"component_patterns":["card","hero","navbar","button"]},
 }
 
 KEYWORD_MAP = {
-    "todo": ["todo", "task", "list", "checklist", "habit", "planner"],
-    "dashboard": ["dashboard", "analytics", "admin", "monitor", "stats", "metric"],
-    "saas": ["saas", "landing", "startup", "product", "service", "platform"],
-    "ecommerce": ["shop", "store", "ecommerce", "cart", "product", "buy", "sell"],
-    "blog": ["blog", "article", "news", "magazine", "post", "write"],
-    "chat": ["chat", "message", "messenger", "discord", "slack", "talk"],
-    "finance": ["finance", "budget", "money", "expense", "invoice", "bank", "crypto"],
-    "portfolio": ["portfolio", "resume", "cv", "personal", "showcase"],
+    "todo":      ["todo","task","list","checklist","habit","planner"],
+    "dashboard": ["dashboard","analytics","admin","monitor","stats","metric"],
+    "saas":      ["saas","landing","startup","product","service","platform"],
+    "ecommerce": ["shop","store","ecommerce","cart","product","buy","sell"],
+    "blog":      ["blog","article","news","magazine","post","write"],
+    "chat":      ["chat","message","messenger","discord","slack","talk"],
+    "finance":   ["finance","budget","money","expense","invoice","bank","crypto"],
+    "portfolio": ["portfolio","resume","cv","personal","showcase"],
 }
+
+KEYFRAME_RE = re.compile(r'(@keyframes\s+([\w]+)\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})', re.DOTALL)
 
 def match_design_category(keyword: str) -> str:
     kw = keyword.lower()
@@ -252,235 +109,177 @@ def match_design_category(keyword: str) -> str:
             return category
     return "default"
 
-
-# ─── Scrapers (now use reliable open sources) ─────────────────────────────────
-
-async def scrape_google_fonts(client: httpx.AsyncClient, keyword: str) -> dict:
-    """Fetch trending fonts from Google Fonts — always works, no blocking."""
-    url = "https://fonts.google.com/metadata/fonts"
+async def fetch_animate_css_keyframes(client, category):
+    wanted = set(CATEGORY_ANIMATIONS.get(category, CATEGORY_ANIMATIONS["default"]))
     try:
-        r = await client.get(url, headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
-        text = r.text.lstrip(")]}'\n")   # Google's XSSI prefix
-        data = json.loads(text)
-        families = data.get("familyMetadataList", [])
+        r = await client.get(ANIMATE_CSS_CDN, headers=HEADERS, timeout=TIMEOUT)
+        extracted = {name: block.strip() for block, name in KEYFRAME_RE.findall(r.text) if name in wanted}
+        return {"source": "animate.css", "keyframes": extracted, "animation_names": list(extracted.keys())}
+    except Exception:
+        return {"source": "animate.css-fallback", "keyframes": {
+            "fadeInUp": "@keyframes fadeInUp{from{opacity:0;transform:translate3d(0,20px,0)}to{opacity:1;transform:translate3d(0,0,0)}}",
+            "fadeIn":   "@keyframes fadeIn{from{opacity:0}to{opacity:1}}",
+            "zoomIn":   "@keyframes zoomIn{from{opacity:0;transform:scale3d(.8,.8,.8)}to{opacity:1;transform:scale3d(1,1,1)}}",
+        }, "animation_names": ["fadeInUp","fadeIn","zoomIn"]}
 
-        # Pick fonts relevant to keyword category
-        category = match_design_category(keyword)
-        preferred_categories = {
-            "blog": ["Serif"],
-            "portfolio": ["Serif", "Display"],
-        }.get(category, ["Sans Serif"])
-
-        picked = []
-        for f in families:
-            if f.get("category") in preferred_categories and f.get("popularity", 999) < 30:
-                picked.append(f["family"])
-            if len(picked) >= 3:
+async def fetch_gradients(client, category):
+    db = GRADIENT_DB.get(category, GRADIENT_DB["default"])
+    kw_map = {"todo":["midnight","cosmic","deep"],"dashboard":["dark","carbon","ocean"],"saas":["violet","purple","deep"],"ecommerce":["warm","autumn","ember"],"blog":["dark","romance","ink"],"chat":["twilight","nebula","dark"],"finance":["dark","matrix","carbon"],"portfolio":["obsidian","void","dark"],"default":["midnight","dark"]}
+    try:
+        r = await client.get(GRADIENTS_JSON_URL, headers=HEADERS, timeout=TIMEOUT)
+        data = r.json()
+        kws = kw_map.get(category, ["midnight","dark"])
+        matched = []
+        for g in data:
+            name = g.get("name","").lower()
+            colors = g.get("colors",[])
+            if len(colors) >= 2 and any(k in name for k in kws):
+                matched.append((g["name"], f"linear-gradient(135deg,{colors[0]} 0%,{colors[-1]} 100%)", "#f8fafc"))
+            if len(matched) >= 2:
                 break
+        return {"source": "uigradients", "gradients": matched or db}
+    except Exception:
+        return {"source": "gradient-db", "gradients": db}
 
-        # Fallback to top popular
-        if not picked:
-            picked = [f["family"] for f in families[:3]]
+async def fetch_google_fonts(client, category):
+    try:
+        r = await client.get("https://fonts.google.com/metadata/fonts", headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
+        data = json.loads(r.text.lstrip(")]}'\n"))
+        families = data.get("familyMetadataList", [])
+        preferred = {"blog":["Serif"],"portfolio":["Serif","Display"]}.get(category, ["Sans Serif"])
+        picked = [f["family"] for f in families if f.get("category") in preferred][:2]
+        return picked or [f["family"] for f in families[:2]]
+    except Exception:
+        return []
 
-        return {
-            "source": "google-fonts",
-            "keyword": keyword,
-            "colors": [],
-            "fonts": picked,
-            "spacing_scale": [],
-            "border_radius": [],
-            "animation_examples": [],
-            "transition_examples": [],
-            "easing_functions": [],
-            "component_patterns": [],
-        }
-    except Exception as e:
-        return {"source": "google-fonts", "error": str(e)}
+def get_transition_recipes(category):
+    names = CATEGORY_TRANSITIONS.get(category, CATEGORY_TRANSITIONS["default"])
+    return {"source":"transition-recipes","recipes":{n:TRANSITION_RECIPES[n] for n in names if n in TRANSITION_RECIPES},"primary":TRANSITION_RECIPES.get(names[0], TRANSITION_RECIPES["smooth"])}
 
+async def scrape_design_db(client, keyword):
+    cat = match_design_category(keyword)
+    db = DESIGN_DB[cat]
+    return {"source":f"design-db:{cat}","keyword":keyword,"colors":db["colors"],"fonts":db["fonts"],"spacing_scale":db["spacing_scale"],"border_radius":db["border_radius"],"component_patterns":db["component_patterns"],"animation_examples":[],"transition_examples":[],"easing_functions":[]}
 
-async def scrape_design_db(client: httpx.AsyncClient, keyword: str) -> dict:
-    """Return tokens from curated design DB — instant, zero network calls."""
-    category = match_design_category(keyword)
-    db = DESIGN_DB[category]
-    return {
-        "source": f"design-db:{category}",
-        "keyword": keyword,
-        "colors":             db["colors"],
-        "fonts":              db["fonts"],
-        "spacing_scale":      db["spacing_scale"],
-        "border_radius":      db["border_radius"],
-        "animation_examples": db["animation_examples"],
-        "transition_examples":db["transition_examples"],
-        "easing_functions":   db["easing_functions"],
-        "component_patterns": db["component_patterns"],
-    }
-
-
-# ─── Merge & score ────────────────────────────────────────────────────────────
-
-def merge_results(results: list[dict]) -> dict:
-    all_colors:     list[str] = []
-    all_fonts:      list[str] = []
-    all_spacing:    list[str] = []
-    all_radii:      list[str] = []
-    all_animations: list[str] = []
-    all_transitions:list[str] = []
-    all_easings:    list[str] = []
-    all_components: list[str] = []
-    sources:        list[str] = []
-
+def merge_results(results):
+    all_colors,all_fonts,all_spacing,all_radii,all_comps,sources = [],[],[],[],[],[]
     for r in results:
-        if "error" in r:
-            continue
-        sources.append(r.get("source", "?"))
-        all_colors     += r.get("colors", [])
-        all_fonts      += r.get("fonts", [])
-        all_spacing    += r.get("spacing_scale", [])
-        all_radii      += r.get("border_radius", [])
-        all_animations += r.get("animation_examples", [])
-        all_transitions+= r.get("transition_examples", [])
-        all_easings    += r.get("easing_functions", [])
-        all_components += r.get("component_patterns", [])
+        if "error" in r: continue
+        sources.append(r.get("source","?"))
+        all_colors+=r.get("colors",[]); all_fonts+=r.get("fonts",[]); all_spacing+=r.get("spacing_scale",[])
+        all_radii+=r.get("border_radius",[]); all_comps+=r.get("component_patterns",[])
+    def dedup(lst,n=8): return list(dict.fromkeys(lst))[:n]
+    return {"sources_scraped":sources,"color_palette":dedup(all_colors,10),"fonts":dedup(all_fonts,5),"spacing_scale":dedup(all_spacing,6),"border_radius":dedup(all_radii,4),"component_patterns":dedup(all_comps)}
 
-    def dedup(lst, limit=8):
-        return list(dict.fromkeys(lst))[:limit]
+def build_design_brief(merged, keyword, category, anim_data, gradient_data, transition_data, extra_fonts):
+    palette=merged["color_palette"]; fonts=list(dict.fromkeys(merged["fonts"]+extra_fonts))[:4]
+    spacing=merged["spacing_scale"]; radii=merged["border_radius"]; comps=merged["component_patterns"]
 
-    return {
-        "sources_scraped": sources,
-        "color_palette":   dedup(all_colors, 10),
-        "fonts":           dedup(all_fonts, 5),
-        "spacing_scale":   dedup(all_spacing, 6),
-        "border_radius":   dedup(all_radii, 4),
-        "animation_examples":  dedup(all_animations, 4),
-        "transition_examples": dedup(all_transitions, 4),
-        "easing_functions":    dedup(all_easings, 4),
-        "component_patterns":  dedup(all_components),
-    }
+    bg=palette[0] if len(palette)>0 else "#0f172a"; surf=palette[1] if len(palette)>1 else "#1e293b"
+    light=palette[2] if len(palette)>2 else "#f8fafc"; muted=palette[3] if len(palette)>3 else "#e2e8f0"
+    acc=palette[4] if len(palette)>4 else "#6366f1"; pos=palette[5] if len(palette)>5 else "#22c55e"
+    r0=radii[0] if radii else "8px"; r1=radii[1] if len(radii)>1 else "16px"
+    sp2=spacing[2] if len(spacing)>2 else "24px"; f0=fonts[0] if fonts else "Plus Jakarta Sans"; f1=fonts[1] if len(fonts)>1 else "DM Sans"
 
+    gradients=gradient_data.get("gradients",[])
+    hero_grad=gradients[0][1] if gradients else f"linear-gradient(135deg,{bg} 0%,{surf} 100%)"
+    card_grad=gradients[1][1] if len(gradients)>1 else f"linear-gradient(135deg,{surf} 0%,{bg} 100%)"
 
-def build_design_brief(merged: dict, keyword: str) -> dict:
-    palette     = merged["color_palette"]
-    fonts       = merged["fonts"]
-    spacing     = merged["spacing_scale"]
-    radii       = merged["border_radius"]
-    comps       = merged["component_patterns"]
-    easings     = merged["easing_functions"]
-    transitions = merged["transition_examples"]
+    primary_trans=transition_data.get("primary","all 0.2s cubic-bezier(0.4,0,0.2,1)")
+    recipes=transition_data.get("recipes",{})
+    lift_trans=recipes.get("lift","transform 0.2s ease, box-shadow 0.2s ease")
+    color_trans=recipes.get("color_only","color 0.2s ease, background-color 0.2s ease")
 
-    font_str  = " + ".join(fonts[:2]) if fonts else "Plus Jakarta Sans + DM Sans"
-    comp_str  = ", ".join(comps[:6])  if comps else "card, hero, navbar"
-    easing_str = easings[0]           if easings else "cubic-bezier(0.4,0,0.2,1)"
-    trans_str  = transitions[0]       if transitions else "all 0.2s cubic-bezier(0.4,0,0.2,1)"
+    keyframes=anim_data.get("keyframes",{}); anim_names=anim_data.get("animation_names",["fadeInUp","fadeIn"])
+    keyframes_css="\n\n".join(keyframes.values())
 
-    bg   = palette[0] if len(palette) > 0 else "#0f172a"
-    surf = palette[1] if len(palette) > 1 else "#1e293b"
-    light= palette[2] if len(palette) > 2 else "#f8fafc"
-    muted= palette[3] if len(palette) > 3 else "#e2e8f0"
-    acc  = palette[4] if len(palette) > 4 else "#6366f1"
-    pos  = palette[5] if len(palette) > 5 else "#22c55e"
-    r0   = radii[0]   if len(radii) > 0   else "8px"
-    r1   = radii[1]   if len(radii) > 1   else "16px"
-    sp2  = spacing[2] if len(spacing) > 2  else "24px"
-    f0   = fonts[0]   if len(fonts) > 0   else "Plus Jakarta Sans"
-    f1   = fonts[1]   if len(fonts) > 1   else "DM Sans"
+    comp_class_hints=[f'{c} elements: add class "{ELEMENT_ANIMATION_MAP[c]}"' for c in comps if c in ELEMENT_ANIMATION_MAP]
+    stagger="Apply staggered animation-delay: 1st child 0ms, 2nd 80ms, 3rd 160ms, 4th 240ms"
 
-    css_prompt = (
+    f0q=f0.replace(" ","+"); f1q=f1.replace(" ","+")
+
+    css_prompt=(
         "MANDATORY DESIGN SYSTEM - follow every rule exactly:\n\n"
-        "CSS Custom Properties (place in :root):\n"
-        f"  --bg: {bg};\n"
-        f"  --surface: {surf};\n"
-        f"  --surface-2: color-mix(in srgb, {surf} 80%, {light});\n"
-        f"  --text: {light};\n"
-        f"  --text-muted: {muted};\n"
-        f"  --accent: {acc};\n"
-        f"  --positive: {pos};\n"
-        f"  --radius: {r0};\n"
-        f"  --radius-lg: {r1};\n"
-        f"  --transition: {trans_str};\n\n"
-        f"Typography - import from Google Fonts and apply:\n"
-        f"  body font-family: '{f0}', sans-serif;\n"
-        f"  headings: '{f0}' bold;\n"
-        f"  mono/data: '{f1}';\n\n"
-        "Layout rules:\n"
-        "  body background: var(--bg);\n"
-        f"  all cards/panels: background var(--surface), border-radius var(--radius-lg), padding 24px, border 1px solid rgba(255,255,255,0.06);\n"
-        f"  section spacing: gap {sp2};\n"
-        "  max-width container: 1200px, margin auto, padding 0 24px;\n\n"
-        "Component rules (apply to ALL matching elements):\n"
-        "  buttons: background var(--accent), color #fff, padding 10px 20px, border-radius var(--radius), font-weight 600, transition var(--transition), no border;\n"
-        "  buttons:hover: filter brightness(1.15), transform translateY(-1px);\n"
-        "  inputs: background var(--surface-2), border 1px solid rgba(255,255,255,0.08), color var(--text), border-radius var(--radius), padding 10px 14px;\n"
-        "  inputs:focus: border-color var(--accent), outline none, box-shadow 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);\n"
-        "  cards: box-shadow 0 4px 24px rgba(0,0,0,0.3);\n"
-        "  navbar/header: background var(--surface), border-bottom 1px solid rgba(255,255,255,0.06), padding 16px 24px;\n"
-        "  badges/pills: background color-mix(in srgb, var(--accent) 15%, transparent), color var(--accent), padding 4px 10px, border-radius 999px, font-size 0.75rem;\n"
-        "  positive values: color var(--positive);\n"
-        "  tables/lists: border-bottom 1px solid rgba(255,255,255,0.05) per row;\n\n"
-        "Animations:\n"
-        f"  page load: @keyframes fadeUp - from opacity:0 translateY(16px) to opacity:1 translateY(0), 400ms {easing_str};\n"
-        "  apply fadeUp to cards with staggered animation-delay (0ms, 80ms, 160ms);\n"
-        "  all interactive elements: transition var(--transition);\n\n"
-        f"DETECTED PATTERNS for this project: {comp_str}"
+        "1. GOOGLE FONTS IMPORT (top of CSS):\n"
+        f"   @import url('https://fonts.googleapis.com/css2?family={f0q}:wght@400;500;600;700&family={f1q}:wght@400;500;600&display=swap');\n\n"
+        "2. ANIMATE.CSS CDN (in HTML <head>):\n"
+        "   <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css\"/>\n\n"
+        "3. :root CSS VARIABLES:\n"
+        f"   --bg:{bg}; --surface:{surf}; --surface-2:color-mix(in srgb,{surf} 80%,{light} 20%);\n"
+        f"   --text:{light}; --text-muted:{muted}; --accent:{acc}; --positive:{pos};\n"
+        f"   --radius:{r0}; --radius-lg:{r1};\n"
+        f"   --transition:{primary_trans};\n"
+        f"   --transition-lift:{lift_trans};\n"
+        f"   --transition-color:{color_trans};\n"
+        f"   --gradient-hero:{hero_grad};\n"
+        f"   --gradient-card:{card_grad};\n\n"
+        f"4. TYPOGRAPHY: body font-family:'{f0}',sans-serif; headings font-weight:700 letter-spacing:-0.02em; mono:'{f1}';\n\n"
+        f"5. LAYOUT: .container max-width:1200px margin:0 auto padding:0 24px; sections gap:{sp2};\n\n"
+        "6. COMPONENTS:\n"
+        "   cards: background:var(--gradient-card); border-radius:var(--radius-lg); padding:24px;\n"
+        "          border:1px solid rgba(255,255,255,0.06); box-shadow:0 4px 24px rgba(0,0,0,0.3); transition:var(--transition-lift);\n"
+        "   cards:hover: transform:translateY(-2px); box-shadow:0 8px 40px rgba(0,0,0,0.4);\n"
+        "   hero: background:var(--gradient-hero); padding:64px 24px;\n"
+        "   navbar: background:var(--surface); border-bottom:1px solid rgba(255,255,255,0.06); padding:16px 24px; backdrop-filter:blur(12px);\n"
+        "   buttons: background:var(--accent); color:#fff; padding:10px 20px; border-radius:var(--radius); font-weight:600; border:none; transition:var(--transition);\n"
+        "   buttons:hover: filter:brightness(1.12); transform:translateY(-1px);\n"
+        "   inputs: background:var(--surface-2); border:1px solid rgba(255,255,255,0.08); color:var(--text); border-radius:var(--radius); padding:10px 14px; transition:var(--transition-color);\n"
+        "   inputs:focus: border-color:var(--accent); outline:none; box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent);\n"
+        "   badges: background:color-mix(in srgb,var(--accent) 15%,transparent); color:var(--accent); padding:4px 10px; border-radius:999px; font-size:0.75rem;\n"
+        "   positive values: color:var(--positive);\n"
+        "   list rows: border-bottom:1px solid rgba(255,255,255,0.05); padding:12px 0;\n\n"
+        f"7. KEYFRAMES (paste into CSS):\n{keyframes_css}\n\n"
+        "8. ANIMATION RULES:\n"
+        "   Cards: animation:fadeInUp 0.4s cubic-bezier(0.4,0,0.2,1) both;\n"
+        f"   {stagger}\n"
+        "   Interactive elements: transition:var(--transition);\n"
+        "   Hover: use transform + box-shadow only (GPU accelerated)\n"
     )
 
-    plan_theme = (
-        f"Modern {keyword} UI - dark theme with {bg} background, {acc} accent, "
-        f"surface cards with subtle borders, {font_str} typography, "
-        f"smooth {easing_str} animations, components: {comp_str}."
+    html_prompt=(
+        "ANIMATE.CSS INTEGRATION:\n"
+        "1. Add in <head>: <link rel=\"stylesheet\" href=\"https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css\"/>\n"
+        "2. Element classes:\n"+"\n".join(f"   - {h}" for h in comp_class_hints)+"\n"
+        f"3. {stagger}\n"
+        f"4. Available animations: {', '.join(anim_names)}\n"
+    )
+
+    plan_theme=(
+        f"Modern {keyword} UI - dark {category} theme; hero:{hero_grad[:40]}...; "
+        f"accent {acc}; {f0}+{f1}; animate.css entrances with stagger; components:{','.join(comps[:5])}."
     )
 
     return {
-        "keyword":            keyword,
-        "sources_scraped":    merged["sources_scraped"],
-        "color_palette":      palette,
-        "fonts":              fonts,
-        "spacing_scale":      spacing,
-        "border_radius":      radii,
-        "component_patterns": comps,
-        "animation_examples":    merged["animation_examples"],
-        "transition_examples":   merged["transition_examples"],
-        "easing_functions":      merged["easing_functions"],
-        "css_prompt_injection":  css_prompt,
-        "plan_theme_injection":  plan_theme,
+        "keyword":keyword,"category":category,
+        "sources_scraped":merged["sources_scraped"]+[anim_data["source"],gradient_data["source"]],
+        "color_palette":palette,"fonts":fonts,"spacing_scale":spacing,"border_radius":radii,"component_patterns":comps,
+        "gradients":[{"name":g[0],"css":g[1]} for g in gradients],
+        "keyframes":list(keyframes.keys()),"transition_recipes":recipes,
+        "css_prompt_injection":css_prompt,
+        "html_prompt_injection":html_prompt,
+        "plan_theme_injection":plan_theme,
     }
-
-# ─── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
-    return {"status": "running"}
-
+    return {"status":"running","version":"2.0.0"}
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
-
+    return {"status":"ok"}
 
 @app.get("/design-brief")
 async def design_brief(keyword: str = Query(default="saas dashboard")):
-    """
-    Scrape Awwwards + Land-book for `keyword`, extract design tokens,
-    and return a design brief JSON ready for LLM injection.
-    """
-    async with httpx.AsyncClient(
-        timeout=TIMEOUT,
-        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
-    ) as client:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                scrape_design_db(client, keyword),
-                scrape_google_fonts(client, keyword),
-            ),
+    category = match_design_category(keyword)
+    async with httpx.AsyncClient(timeout=TIMEOUT, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)) as client:
+        db_result, anim_data, gradient_data, extra_fonts = await asyncio.wait_for(
+            asyncio.gather(scrape_design_db(client,keyword), fetch_animate_css_keyframes(client,category), fetch_gradients(client,category), fetch_google_fonts(client,category)),
             timeout=8
         )
-
-    merged = merge_results(list(results))
-    brief  = build_design_brief(merged, keyword)
+    transition_data = get_transition_recipes(category)
+    merged = merge_results([db_result])
+    brief = build_design_brief(merged,keyword,category,anim_data,gradient_data,transition_data,extra_fonts)
     return brief
-
-
-import os
-import uvicorn
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
