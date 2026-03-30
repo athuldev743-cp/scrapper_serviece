@@ -4,7 +4,6 @@ import asyncio
 import httpx
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from bs4 import BeautifulSoup
 
 app = FastAPI(title="Design Scraper Service", version="1.0.0")
 
@@ -138,62 +137,183 @@ def extract_component_patterns(soup: BeautifulSoup, css_text: str = "") -> list[
     )).lower()
     return [kw for kw in COMPONENT_KEYWORDS if kw in combined]
 
-# ─── Scrapers ─────────────────────────────────────────────────────────────────
+# ─── Design token database (curated, always available) ───────────────────────
+# Keyword-matched palettes sourced from real design systems & open-source UIs.
+# These never get blocked and return instantly.
 
-async def scrape_awwwards(client: httpx.AsyncClient, keyword: str) -> dict:
-    url = f"https://www.awwwards.com/websites/search/?text={keyword}"
+DESIGN_DB = {
+    "todo": {
+        "colors": ["#0f172a", "#6366f1", "#f1f5f9", "#e2e8f0", "#22c55e", "#ef4444"],
+        "fonts": ["Plus Jakarta Sans", "DM Sans"],
+        "spacing_scale": ["4px", "8px", "16px", "24px", "48px"],
+        "border_radius": ["6px", "12px", "999px"],
+        "component_patterns": ["card", "pill", "checkbox", "input", "toast"],
+        "animation_examples": ["transform 200ms ease", "opacity 150ms ease-in-out"],
+        "transition_examples": ["all 0.2s cubic-bezier(0.4,0,0.2,1)"],
+        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)", "ease-out"],
+    },
+    "dashboard": {
+        "colors": ["#0a0a0b", "#18181b", "#3b82f6", "#06b6d4", "#f0fdf4", "#d1fae5"],
+        "fonts": ["Inter", "JetBrains Mono"],
+        "spacing_scale": ["8px", "16px", "24px", "32px", "64px"],
+        "border_radius": ["4px", "8px", "16px"],
+        "component_patterns": ["card", "sidebar", "chart", "badge", "navbar", "grid"],
+        "animation_examples": ["transform 300ms ease", "width 500ms ease-in-out"],
+        "transition_examples": ["all 0.3s ease"],
+        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
+    },
+    "saas": {
+        "colors": ["#030712", "#6366f1", "#8b5cf6", "#f9fafb", "#e5e7eb", "#fbbf24"],
+        "fonts": ["Sora", "Inter"],
+        "spacing_scale": ["8px", "16px", "32px", "64px", "128px"],
+        "border_radius": ["8px", "16px", "24px"],
+        "component_patterns": ["hero", "card", "navbar", "modal", "badge", "glass"],
+        "animation_examples": ["transform 400ms cubic-bezier(0.4,0,0.2,1)", "opacity 300ms ease"],
+        "transition_examples": ["all 0.25s ease"],
+        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)", "cubic-bezier(0.16,1,0.3,1)"],
+    },
+    "ecommerce": {
+        "colors": ["#1c1917", "#f97316", "#fef3c7", "#ffffff", "#e7e5e4", "#10b981"],
+        "fonts": ["Nunito", "Lato"],
+        "spacing_scale": ["8px", "12px", "20px", "32px", "48px"],
+        "border_radius": ["4px", "8px", "20px"],
+        "component_patterns": ["card", "badge", "hero", "grid", "pill", "toast"],
+        "animation_examples": ["transform 200ms ease-out", "box-shadow 200ms ease"],
+        "transition_examples": ["all 0.2s ease-out"],
+        "easing_functions": ["ease-out", "cubic-bezier(0.4,0,0.2,1)"],
+    },
+    "blog": {
+        "colors": ["#1a1a2e", "#e94560", "#f5f5f5", "#ffffff", "#16213e", "#0f3460"],
+        "fonts": ["Playfair Display", "Source Serif 4"],
+        "spacing_scale": ["8px", "16px", "24px", "40px", "80px"],
+        "border_radius": ["2px", "4px", "8px"],
+        "component_patterns": ["card", "hero", "navbar", "grid"],
+        "animation_examples": ["opacity 300ms ease", "transform 300ms ease"],
+        "transition_examples": ["all 0.3s ease"],
+        "easing_functions": ["ease", "ease-in-out"],
+    },
+    "chat": {
+        "colors": ["#0f172a", "#1e293b", "#38bdf8", "#e2e8f0", "#7c3aed", "#f472b6"],
+        "fonts": ["Outfit", "JetBrains Mono"],
+        "spacing_scale": ["4px", "8px", "12px", "16px", "24px"],
+        "border_radius": ["8px", "16px", "24px", "999px"],
+        "component_patterns": ["card", "pill", "modal", "blur", "glass", "shadow"],
+        "animation_examples": ["transform 150ms ease", "opacity 200ms ease-in-out"],
+        "transition_examples": ["all 0.15s ease"],
+        "easing_functions": ["ease-out", "cubic-bezier(0.4,0,0.2,1)"],
+    },
+    "finance": {
+        "colors": ["#0d1117", "#161b22", "#00d084", "#0075ff", "#f0f6fc", "#8b949e"],
+        "fonts": ["IBM Plex Sans", "IBM Plex Mono"],
+        "spacing_scale": ["8px", "16px", "24px", "32px", "48px"],
+        "border_radius": ["4px", "6px", "12px"],
+        "component_patterns": ["card", "chart", "badge", "table", "sidebar", "navbar"],
+        "animation_examples": ["width 600ms cubic-bezier(0.4,0,0.2,1)", "opacity 200ms ease"],
+        "transition_examples": ["all 0.2s ease"],
+        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
+    },
+    "portfolio": {
+        "colors": ["#09090b", "#18181b", "#a1a1aa", "#fafafa", "#e4e4e7", "#6366f1"],
+        "fonts": ["Space Grotesk", "Fraunces"],
+        "spacing_scale": ["8px", "16px", "32px", "64px", "120px"],
+        "border_radius": ["0px", "4px", "8px"],
+        "component_patterns": ["hero", "grid", "card", "navbar"],
+        "animation_examples": ["transform 500ms cubic-bezier(0.16,1,0.3,1)", "opacity 400ms ease"],
+        "transition_examples": ["all 0.4s cubic-bezier(0.16,1,0.3,1)"],
+        "easing_functions": ["cubic-bezier(0.16,1,0.3,1)", "cubic-bezier(0.4,0,0.2,1)"],
+    },
+    "default": {
+        "colors": ["#0f172a", "#6366f1", "#f8fafc", "#e2e8f0", "#22c55e", "#f59e0b"],
+        "fonts": ["Plus Jakarta Sans", "DM Sans"],
+        "spacing_scale": ["8px", "16px", "24px", "48px"],
+        "border_radius": ["8px", "12px"],
+        "component_patterns": ["card", "hero", "navbar", "button"],
+        "animation_examples": ["transform 200ms ease", "opacity 200ms ease"],
+        "transition_examples": ["all 0.2s cubic-bezier(0.4,0,0.2,1)"],
+        "easing_functions": ["cubic-bezier(0.4,0,0.2,1)"],
+    },
+}
+
+KEYWORD_MAP = {
+    "todo": ["todo", "task", "list", "checklist", "habit", "planner"],
+    "dashboard": ["dashboard", "analytics", "admin", "monitor", "stats", "metric"],
+    "saas": ["saas", "landing", "startup", "product", "service", "platform"],
+    "ecommerce": ["shop", "store", "ecommerce", "cart", "product", "buy", "sell"],
+    "blog": ["blog", "article", "news", "magazine", "post", "write"],
+    "chat": ["chat", "message", "messenger", "discord", "slack", "talk"],
+    "finance": ["finance", "budget", "money", "expense", "invoice", "bank", "crypto"],
+    "portfolio": ["portfolio", "resume", "cv", "personal", "showcase"],
+}
+
+def match_design_category(keyword: str) -> str:
+    kw = keyword.lower()
+    for category, terms in KEYWORD_MAP.items():
+        if any(t in kw for t in terms):
+            return category
+    return "default"
+
+
+# ─── Scrapers (now use reliable open sources) ─────────────────────────────────
+
+async def scrape_google_fonts(client: httpx.AsyncClient, keyword: str) -> dict:
+    """Fetch trending fonts from Google Fonts — always works, no blocking."""
+    url = "https://fonts.google.com/metadata/fonts"
     try:
         r = await client.get(url, headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
-        soup = BeautifulSoup(r.text, "html.parser")
-        css_text = r.text
+        text = r.text.lstrip(")]}'\n")   # Google's XSSI prefix
+        data = json.loads(text)
+        families = data.get("familyMetadataList", [])
 
-        colors  = extract_colors_from_soup(soup)
-        fonts   = extract_fonts(soup, css_text)
-        spacing = extract_spacing(css_text)
-        animations = extract_animations(css_text)
-        components = extract_component_patterns(soup, css_text)
+        # Pick fonts relevant to keyword category
+        category = match_design_category(keyword)
+        preferred_categories = {
+            "blog": ["Serif"],
+            "portfolio": ["Serif", "Display"],
+        }.get(category, ["Sans Serif"])
 
-        # Try to pull a site name for context
-        titles = [t.get_text(strip=True) for t in soup.select(".title")[:3]]
+        picked = []
+        for f in families:
+            if f.get("category") in preferred_categories and f.get("popularity", 999) < 30:
+                picked.append(f["family"])
+            if len(picked) >= 3:
+                break
 
-        return {
-            "source": "awwwards",
-            "keyword": keyword,
-            "reference_sites": titles,
-            "colors": colors,
-            "fonts": fonts,
-            **spacing,
-            **animations,
-            "component_patterns": components,
-        }
-    except Exception as e:
-        return {"source": "awwwards", "error": str(e)}
-
-
-async def scrape_landbook(client: httpx.AsyncClient, keyword: str) -> dict:
-    url = f"https://land-book.com/?search={keyword}"
-    try:
-        r = await client.get(url, headers=HEADERS, timeout=TIMEOUT, follow_redirects=True)
-        soup = BeautifulSoup(r.text, "html.parser")
-        css_text = r.text
-
-        colors  = extract_colors_from_soup(soup)
-        fonts   = extract_fonts(soup, css_text)
-        spacing = extract_spacing(css_text)
-        animations = extract_animations(css_text)
-        components = extract_component_patterns(soup, css_text)
+        # Fallback to top popular
+        if not picked:
+            picked = [f["family"] for f in families[:3]]
 
         return {
-            "source": "land-book",
+            "source": "google-fonts",
             "keyword": keyword,
-            "colors": colors,
-            "fonts": fonts,
-            **spacing,
-            **animations,
-            "component_patterns": components,
+            "colors": [],
+            "fonts": picked,
+            "spacing_scale": [],
+            "border_radius": [],
+            "animation_examples": [],
+            "transition_examples": [],
+            "easing_functions": [],
+            "component_patterns": [],
         }
     except Exception as e:
-        return {"source": "land-book", "error": str(e)}
+        return {"source": "google-fonts", "error": str(e)}
+
+
+async def scrape_design_db(client: httpx.AsyncClient, keyword: str) -> dict:
+    """Return tokens from curated design DB — instant, zero network calls."""
+    category = match_design_category(keyword)
+    db = DESIGN_DB[category]
+    return {
+        "source": f"design-db:{category}",
+        "keyword": keyword,
+        "colors":             db["colors"],
+        "fonts":              db["fonts"],
+        "spacing_scale":      db["spacing_scale"],
+        "border_radius":      db["border_radius"],
+        "animation_examples": db["animation_examples"],
+        "transition_examples":db["transition_examples"],
+        "easing_functions":   db["easing_functions"],
+        "component_patterns": db["component_patterns"],
+    }
 
 
 # ─── Merge & score ────────────────────────────────────────────────────────────
@@ -312,8 +432,8 @@ async def design_brief(keyword: str = Query(default="saas dashboard")):
     ) as client:
         results = await asyncio.wait_for(
             asyncio.gather(
-                scrape_awwwards(client, keyword),
-                scrape_landbook(client, keyword),
+                scrape_design_db(client, keyword),
+                scrape_google_fonts(client, keyword),
             ),
             timeout=8
         )
