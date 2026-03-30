@@ -386,7 +386,7 @@ def build_design_brief(merged: dict, keyword: str) -> dict:
     )
 
     plan_theme = (
-        f"Modern {keyword} UI — palette: {color_str}; "
+        f"Modern {keyword} UI - palette: {color_str}; "
         f"fonts: {font_str}; components: {comp_str}; "
         f"smooth micro-animations with {easing_str} easing."
     )
