@@ -1,4 +1,4 @@
-import re
+﻿import re
 import json
 import asyncio
 import httpx
@@ -24,7 +24,7 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-TIMEOUT = 12.0
+TIMEOUT = 6.0
 
 # ─── Colour helpers ──────────────────────────────────────────────────────────
 
@@ -290,6 +290,11 @@ def build_design_brief(merged: dict, keyword: str) -> dict:
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
+@app.get("/")
+async def root():
+    return {"status": "running"}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -301,12 +306,26 @@ async def design_brief(keyword: str = Query(default="saas dashboard")):
     Scrape Awwwards + Land-book for `keyword`, extract design tokens,
     and return a design brief JSON ready for LLM injection.
     """
-    async with httpx.AsyncClient() as client:
-        results = await asyncio.gather(
-            scrape_awwwards(client, keyword),
-            scrape_landbook(client, keyword),
+    async with httpx.AsyncClient(
+        timeout=TIMEOUT,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5)
+    ) as client:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                scrape_awwwards(client, keyword),
+                scrape_landbook(client, keyword),
+            ),
+            timeout=8
         )
 
     merged = merge_results(list(results))
     brief  = build_design_brief(merged, keyword)
     return brief
+
+
+import os
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("scraper_service.main:app", host="0.0.0.0", port=port)
